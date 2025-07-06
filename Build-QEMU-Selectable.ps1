@@ -1,11 +1,24 @@
+# Neustart als Admin, wenn nicht bereits mit Adminrechten gestartet
+If (-not ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(`
+    [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    
+    Write-Host "Starte Skript neu mit Administratorrechten..."
+    Start-Process -FilePath "powershell.exe" `
+        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" `
+        -Verb RunAs
+    Exit
+}
+
 function Show-Menu {
     Write-Host ""
     Write-Host "========== QEMU Build Setup =========="
     Write-Host "1. MSYS2 installieren"
     Write-Host "2. QEMU herunterladen oder aktualisieren"
     Write-Host "3. QEMU kompilieren und installieren"
-    Write-Host "4. MSYS2 deinstallieren"
-    Write-Host "5. Beenden"
+    Write-Host "4. BBoot installieren"
+    Write-Host "5. MSYS2 deinstallieren"
+    Write-Host "6. Beenden"
     Write-Host "======================================"
 }
 
@@ -41,7 +54,7 @@ $mingw64_bin = "$msys2_root\mingw64\bin"
 # Start-Menü
 do {
     Show-Menu
-    $choice = Read-Host "Wähle eine Option (1-5)"
+    $choice = Read-Host "Wähle eine Option (1-6)"
 
     switch ($choice) {
         '1' {
@@ -51,9 +64,14 @@ do {
                 Write-Host "Lade herunter: $url"
                 Invoke-WebRequest -Uri $url -OutFile $msys2_installer_path
                 #Start-Process -FilePath $msys2_installer_path -ArgumentList "/S" -Wait
-                Start-Process -FilePath $msys2_installer_path -ArgumentList "install --root C:\msys64 --confirm-command" -Wait
-                Start-Sleep -Seconds 10
-                Write-Host "MSYS2 wurde installiert."
+				Start-Process -FilePath $msys2_installer_path -ArgumentList "install --root C:\msys64 --confirm-command" -Wait
+				Start-Sleep -Seconds 10
+				Write-Host "MSYS2 wurde installiert."
+
+				if (Test-Path $msys2_installer_path) {
+					Remove-Item $msys2_installer_path -Force
+					Write-Host "Temporäre MSYS2-Installationsdatei wurde gelöscht."
+				}
             } else {
                 Write-Host "MSYS2 ist bereits installiert."
             }
@@ -127,6 +145,67 @@ do {
 		}
 
 		'4' {
+			Write-Host "Lade neuestes BBoot-Release von Codeberg…"
+			try {
+				$bbootApi = "https://codeberg.org/api/v1/repos/qmiga/bboot/releases"
+				$releases = Invoke-RestMethod -Uri $bbootApi -UseBasicParsing
+				$latest = $releases | Sort-Object published_at -Descending | Select-Object -First 1
+
+				$asset = $latest.assets | Where-Object { $_.name -match "\.zip$|\.tar\.gz$|\.tgz$|\.tar\.xz$" } |
+						 Sort-Object name | Select-Object -First 1
+				if (-not $asset) {
+					throw "Kein unterstütztes Archiv (.zip/.tar.gz/.tgz/.tar.xz) im neuesten Release gefunden!"
+				}
+
+				$fileName = $asset.name
+				$dlUrl = $asset.browser_download_url
+				$tmpFile = Join-Path $env:TEMP $fileName
+
+				Write-Host "Herunterladen: $fileName"
+				Invoke-WebRequest -Uri $dlUrl -OutFile $tmpFile
+
+				Write-Host "Entpacke nach $qemu_install_dir…"
+				switch -Wildcard ($fileName) {
+					"*.zip" {
+						Expand-Archive -Path $tmpFile -DestinationPath $qemu_install_dir -Force
+					}
+					"*.tar.gz" {
+						if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
+							throw "tar.exe wurde nicht gefunden!"
+						}
+						& tar.exe -xf $tmpFile -C $qemu_install_dir
+					}
+					"*.tgz" {
+						if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
+							throw "tar.exe wurde nicht gefunden!"
+						}
+						& tar.exe -xf $tmpFile -C $qemu_install_dir
+					}
+					"*.tar.xz" {
+						if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
+							throw "tar.exe wurde nicht gefunden!"
+						}
+						& tar.exe -xf $tmpFile -C $qemu_install_dir
+					}
+					default {
+						throw "Unbekanntes Archivformat: $fileName"
+					}
+				}
+
+				# Temporäre Datei löschen
+				if (Test-Path $tmpFile) {
+					Remove-Item $tmpFile -Force
+					Write-Host "Temporäres Archiv $fileName wurde gelöscht."
+				}
+
+				Write-Host "BBoot ($fileName) wurde erfolgreich installiert."
+			}
+			catch {
+				Write-Warning "Fehler beim Installieren von BBoot: $_"
+			}
+		}
+
+		'5' {
 			if (Test-Path "$msys2_root\uninstall.exe") {
 				Write-Host "Deinstalliere MSYS2 von $msys2_root..."
 				Start-Process -FilePath "$msys2_root\uninstall.exe" -ArgumentList "purge --confirm-command" -Wait
@@ -136,12 +215,12 @@ do {
 			}
 		}
 
-        '5' {
+        '6' {
             Write-Host "Beende das Skript."
             exit
         }
         default {
-            Write-Warning "Ungültige Eingabe. Bitte 1-4 wählen."
+            Write-Warning "Ungültige Eingabe. Bitte 1-6 wählen."
         }
     }
 

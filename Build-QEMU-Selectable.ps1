@@ -20,6 +20,9 @@ function Show-Menu {
     Write-Host "5. MSYS2 deinstallieren"
     Write-Host "6. Beenden"
     Write-Host "======================================"
+	Write-Host "9. Patches anwenden (vor QEmu kompilieren ausfuehren)"
+	Write-Host "10. Patches Vorschau"
+    Write-Host "======================================"
 }
 
 function Get-LatestMsys2InstallerUrl {
@@ -51,10 +54,10 @@ $qemu_install_dir = "C:\qemu"
 $msys2_installer_path = "$env:TEMP\msys2-installer.exe"
 $mingw64_bin = "$msys2_root\mingw64\bin"
 
-# Start-Menü
+# Start-Menu
 do {
     Show-Menu
-    $choice = Read-Host "Wähle eine Option (1-6)"
+    $choice = Read-Host "Waehle eine Option (1-6)"
 
     switch ($choice) {
         '1' {
@@ -70,7 +73,7 @@ do {
 
 				if (Test-Path $msys2_installer_path) {
 					Remove-Item $msys2_installer_path -Force
-					Write-Host "Temporäre MSYS2-Installationsdatei wurde gelöscht."
+					Write-Host "Temporaere MSYS2-Installationsdatei wurde geloescht."
 				}
             } else {
                 Write-Host "MSYS2 ist bereits installiert."
@@ -85,7 +88,7 @@ do {
             Write-Host "Aktualisiere Paketdatenbank..."
             Run-Msys2Command "pacman -Syu --noconfirm"
 
-            Write-Host "Installiere benötigte Pakete..."
+            Write-Host "Installiere benoetigte Pakete..."
             Run-Msys2Command "pacman -S --needed --noconfirm base-devel git mingw-w64-x86_64-toolchain mingw-w64-x86_64-SDL2 mingw-w64-x86_64-SDL_image mingw-w64-x86_64-glib2 mingw-w64-x86_64-pixman mingw-w64-x86_64-libslirp mingw-w64-x86_64-curl mingw-w64-x86_64-python-pip mingw-w64-x86_64-python-sphinx mingw-w64-x86_64-python-sphinx_rtd_theme mingw-w64-x86_64-ninja mingw-w64-x86_64-gtk3"
 
             if (-not (Test-Path $qemu_dir)) {
@@ -114,7 +117,7 @@ do {
 				New-Item -Path $qemu_install_dir -ItemType Directory -Force | Out-Null
 			}
 
-			Write-Host "Analysiere benötigte DLLs mit ldd..."
+			Write-Host "Analysiere benoetigte DLLs mit ldd..."
 
 			$qemu_binary = Join-Path $qemu_install_dir "qemu-system-ppc.exe"
 
@@ -154,7 +157,7 @@ do {
 				$asset = $latest.assets | Where-Object { $_.name -match "\.zip$|\.tar\.gz$|\.tgz$|\.tar\.xz$" } |
 						 Sort-Object name | Select-Object -First 1
 				if (-not $asset) {
-					throw "Kein unterstütztes Archiv (.zip/.tar.gz/.tgz/.tar.xz) im neuesten Release gefunden!"
+					throw "Kein unterstuetztes Archiv (.zip/.tar.gz/.tgz/.tar.xz) im neuesten Release gefunden!"
 				}
 
 				$fileName = $asset.name
@@ -192,10 +195,10 @@ do {
 					}
 				}
 
-				# Temporäre Datei löschen
+				# Temporaere Datei loeschen
 				if (Test-Path $tmpFile) {
 					Remove-Item $tmpFile -Force
-					Write-Host "Temporäres Archiv $fileName wurde gelöscht."
+					Write-Host "Temporaeres Archiv $fileName wurde geloescht."
 				}
 
 				Write-Host "BBoot ($fileName) wurde erfolgreich installiert."
@@ -219,8 +222,148 @@ do {
             Write-Host "Beende das Skript."
             exit
         }
+
+		'9' {
+			Write-Host "==> Pruefe und korrigiere qga/vss-win32/install.cpp ..."
+
+			$installCpp = "$qemu_dir/qga/vss-win32/install.cpp"
+			if (Test-Path $installCpp) {
+				$lines = Get-Content $installCpp
+				$out = @()
+				$inBlock = $false
+
+				foreach ($line in $lines) {
+					# Starte Block für ConvertStringToBSTR
+					if ($line -match "Support function to convert ASCII string into BSTR") {
+						$out += "#if !defined(__MINGW64_VERSION_MAJOR) || __MINGW64_VERSION_MAJOR < 14 /* Support function to convert ASCII string into BSTR (used in _bstr_t) */"
+						$inBlock = $true
+						continue
+					}
+
+					# Ende des urspruenglichen Blockes erkennen
+					if ($inBlock -and $line -match "^\}") {
+						$out += $line
+						$out += "#endif /* __MINGW64_VERSION_MAJOR < 14 */"
+						$inBlock = $false
+						continue
+					}
+
+					# Ueberspringe alten Block
+					if ($inBlock) { continue }
+
+					# Alle anderen Zeilen übernehmen
+					$out += $line
+				}
+
+				# zurueckschreiben
+				Set-Content -Path $installCpp -Value $out -Encoding UTF8
+				Write-Host ">> install.cpp erfolgreich gepatcht (MINGW64-Version-Bedingung)."
+			} else {
+				Write-Warning "install.cpp nicht gefunden: $installCpp"
+			}
+
+			Write-Host "==> Pruefe und korrigiere os-win32.h ..."
+
+			$osWin32File = "$qemu_dir/include/system/os-win32.h"
+			if (Test-Path $osWin32File) {
+				Write-Host ">> Patch: ftruncate in os-win32.h auskommentieren..."
+				$lines = Get-Content $osWin32File
+				$out = @()
+				$skip = $false
+				foreach ($line in $lines) {
+					if ($line -match '^\s*#if !defined\(ftruncate\)') {
+						$skip = $true
+						$out += "/* #if !defined(ftruncate)"
+						$out += " * # define ftruncate qemu_ftruncate64"
+						$out += " * #endif */"
+						continue
+					}
+					if ($skip) {
+						if ($line -match '^\s*#endif') { $skip = $false }
+						continue
+					}
+					$out += $line
+				}
+				Set-Content -Path $osWin32File -Value $out -Encoding UTF8
+				Write-Host ">> ftruncate-Block erfolgreich auskommentiert."
+			} else {
+				Write-Warning "os-win32.h nicht gefunden: $osWin32File"
+			}
+
+			Write-Host "==> Alle Patches abgeschlossen. Jetzt kannst du QEMU mit Punkt 3 kompilieren."
+		}
+
+		'10' {
+			Write-Host "==> Patch-Vorschau: install.cpp"
+
+			$installCpp = "$qemu_dir/qga/vss-win32/install.cpp"
+			if (Test-Path $installCpp) {
+				$lines = Get-Content $installCpp
+				$inBlock = $false
+
+				foreach ($line in $lines) {
+					if ($line -match "Support function to convert ASCII string into BSTR") {
+						Write-Host "`n--- ALT-Block beginnt hier ---"
+						$inBlock = $true
+					}
+
+					if ($inBlock) {
+						Write-Host $line
+						if ($line -match "^\}") {
+							Write-Host "--- ALT-Block endet hier ---"
+							Write-Host "----------------------------"
+							Write-Host "--- NEU-Block wuerde eingefuegt ---"
+							Write-Host "#if !defined(__MINGW64_VERSION_MAJOR) || __MINGW64_VERSION_MAJOR < 14 /* Support function to convert ASCII string into BSTR */"
+							Write-Host "namespace _com_util { ... }"
+							Write-Host "#endif /* __MINGW64_VERSION_MAJOR < 14 */`n"
+							$inBlock = $false
+						}
+						continue
+					}
+				}
+			} else {
+				Write-Warning "install.cpp nicht gefunden: $installCpp"
+			}
+
+		Write-Host "==> Patch-Vorschau: os-win32.h"
+
+		$osWin32File = "$qemu_dir/include/system/os-win32.h"
+		if (Test-Path $osWin32File) {
+			$lines = Get-Content $osWin32File
+			$found = $false
+			for ($i = 0; $i -lt $lines.Count; $i++) {
+				$line = $lines[$i]
+				# Suche nach ftruncate, ignoriere bereits auskommentierte Zeilen
+				if ($line -match 'ftruncate' -and $line -notmatch '^\s*/\*') {
+					$found = $true
+					Write-Host "`n--- ALT-Block beginnt hier ---"
+					# zeige den Block (3 Zeilen vor #endif)
+					for ($j = $i; $j -lt [Math]::Min($i+5,$lines.Count); $j++) {
+						Write-Host $lines[$j]
+						if ($lines[$j] -match '^\s*#endif') { break }
+					}
+					Write-Host "--- ALT-Block endet hier ---"
+					Write-Host "----------------------------"
+					Write-Host "--- NEU-Block wuerde eingefuegt ---"
+					Write-Host "/* #if !defined(ftruncate)"
+					Write-Host " * # define ftruncate qemu_ftruncate64"
+					Write-Host " * #endif */`n"
+					break
+				}
+			}
+			if (-not $found) {
+				Write-Host ">> ftruncate-Block nicht gefunden oder bereits auskommentiert."
+			}
+		} else {
+			Write-Warning "os-win32.h nicht gefunden: $osWin32File"
+		}
+
+
+			Write-Host "==> Patch-Vorschau abgeschlossen. Keine Dateien wurden veraendert."
+		}
+
         default {
-            Write-Warning "Ungültige Eingabe. Bitte 1-6 wählen."
+            Write-Warning "Ungueltige Eingabe. Bitte 1-6 waehlen."
         }
     }
 
